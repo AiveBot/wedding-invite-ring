@@ -139,29 +139,49 @@ function animate(from, to, opts) {
 }
 function stopAnim(a) { if (a) a.stop(); }
 
-// easings roughly matching reference feel
+// easings — cubic-bezier approximations, no overshoot (silkier than back.out)
+function cubicBezierUnit(x1, y1, x2, y2) {
+  // Solve x(t)=x for t via Newton, return y(t). Control points (0,0)/(1,1) implied.
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  const sampleX = (t) => ((ax * t + bx) * t + cx) * t;
+  const sampleY = (t) => ((ay * t + by) * t + cy) * t;
+  const slopeX = (t) => (3 * ax * t + 2 * bx) * t + cx;
+  return (x) => {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    let t = x;
+    for (let i = 0; i < 6; i++) {
+      const d = sampleX(t) - x;
+      const s = slopeX(t);
+      if (Math.abs(d) < 1e-6 || Math.abs(s) < 1e-6) break;
+      t = Math.max(0, Math.min(1, t - d / s));
+    }
+    return sampleY(t);
+  };
+}
 const ease = {
   power3Out: (t) => 1 - Math.pow(1 - t, 3),
-  power1Out: (t) => 1 - (1 - t),
-  morph: (t) => {
-    // smoothstep-ish springy morph
-    const c1 = 1.70158, c3 = c1 + 1;
-    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-  },
-  grow: (t) => 1 - Math.pow(1 - t, 4),
+  power1Out: (t) => t,
+  // Cuvii expand: cubic-bezier(0.45, 0, 0.1, 1)
+  morph: cubicBezierUnit(0.37, 0.0, 0.63, 1), // ease-in-out, silkier open+close
+  // Cuvii grow: cubic-bezier(0.65, 0, 0.25, 1)
+  grow: cubicBezierUnit(0.65, 0, 0.25, 1),
+  softOut: cubicBezierUnit(0.22, 0.61, 0.36, 1),
 };
 
 function aspectOf(c) { return c.data.w / c.data.h; }
 
 function rebuildStrip() {
-  strip.height = H / 2 - 72 - 16;
-  strip.bottom = 16 - H / 2;
+  // a bit more top/bottom breathing room when expanded
+  strip.height = H / 2 - 88 - 28;
+  strip.bottom = 28 - H / 2;
   let x = 0;
   cards.forEach((c, i) => {
     const w = strip.height * aspectOf(c);
     strip.widths[i] = w;
     strip.centres[i] = x + w / 2;
-    x += w + 8;
+    x += w + 12;
   });
   strip.length = x;
 }
@@ -235,8 +255,8 @@ function setExpanded(card) {
     hint.classList.add('is-hide');
     showDetail(card);
   } else {
-    centre.classList.remove('is-dim');
     showDetail(null);
+    syncCentreWithExpand();
   }
 }
 
@@ -306,13 +326,36 @@ function finishReady() {
 function setExpand(to, onDone) {
   stopAnim(expandAnim);
   expandAnim = null;
-  if (REDUCED) { morph.expand = to; needDraw = true; onDone?.(); return; }
-  const dur = 1.3 * Math.abs(to - morph.expand);
+  if (REDUCED) {
+    morph.expand = to;
+    syncCentreWithExpand();
+    needDraw = true;
+    onDone?.();
+    return;
+  }
+  // slightly longer than Cuvii 1.3s for silkier open/close
+  const dur = 1.55 * Math.abs(to - morph.expand);
   expandAnim = animate(morph.expand, to, {
     duration: dur, ease: ease.morph,
-    onUpdate: (v) => { morph.expand = v; },
-    onComplete: onDone,
+    onUpdate: (v) => {
+      morph.expand = THREE.MathUtils.clamp(v, 0, 1);
+      syncCentreWithExpand();
+    },
+    onComplete: () => {
+      morph.expand = to;
+      syncCentreWithExpand();
+      onDone?.();
+    },
   });
+}
+
+/** Centre text stays hidden until cards have cleared the middle on close. */
+function syncCentreWithExpand() {
+  const showCentre = morph.expand < 0.18 && !expandedCard;
+  if (showCentre) centre.classList.remove('is-dim');
+  else centre.classList.add('is-dim');
+  if (morph.expand > 0.55) hint.classList.add('is-hide');
+  else if (!expandedCard) hint.classList.remove('is-hide');
 }
 
 function openCard(card) {
@@ -322,7 +365,7 @@ function openCard(card) {
     setExpanded(card);
     return;
   }
-  if (morph.expand > 0) return; // mid-close animation
+  if (morph.expand > 0.02) return; // mid-close animation
   rebuildStrip();
   strip.open = true;
   strip.x = strip.target = strip.centres[card.index];
@@ -332,14 +375,19 @@ function openCard(card) {
 }
 
 function closeStrip() {
-  if (!strip.open) return;
+  if (!strip.open && morph.expand < 0.02) return;
   strip.open = false;
   clearTimeout(snapTimer);
   pendingSnap = null;
-  setExpanded(null);
+  // Keep expandedCard until morph finishes so focus/curve stay continuous;
+  // hide detail immediately, restore centre only via syncCentreWithExpand.
+  detail.hidden = true;
+  hint.classList.add('is-hide');
   setExpand(0, () => {
     if (!strip.open) {
       expandedCard = null;
+      showDetail(null);
+      syncCentreWithExpand();
     }
   });
 }
@@ -402,8 +450,8 @@ function stepStrip(dt) {
     const steps = Math.ceil(dt);
     const h = dt / steps / 60;
     for (let i = 0; i < steps; i++) {
-      // critically-damped-ish spring (from reference: 121*(target-x) - 22*v)
-      strip.velocity += (121 * (strip.target - strip.x) - 22 * strip.velocity) * h;
+      // near-critical spring, slightly softer than 121/22 for silkier settle (ω≈9.5, ζ≈1)
+      strip.velocity += (90 * (strip.target - strip.x) - 19 * strip.velocity) * h;
       strip.x += strip.velocity * h;
     }
     if (Math.abs(strip.target - strip.x) < 0.01 && Math.abs(strip.velocity) < 0.01) {
@@ -425,12 +473,12 @@ function frame(ts) {
   const t0 = performance.now();
   const closed = 1 - morph.expand;
 
-  // spin inertia
+  // spin inertia — slower decay for silkier coast
   spin.velocity = THREE.MathUtils.clamp(spin.velocity, -0.3, 0.3);
   if (!pointer) {
     spin.angle += spin.velocity * dt * closed;
-    spin.velocity *= Math.pow(0.94, dt);
-    if (Math.abs(spin.velocity) < 1e-6) spin.velocity = 0;
+    spin.velocity *= Math.pow(0.965, dt);
+    if (Math.abs(spin.velocity) < 5e-7) spin.velocity = 0;
   }
   spin.angle += spin.drift * dt * closed;
   group.rotation.z = spin.angle;
@@ -451,7 +499,7 @@ function frame(ts) {
   for (const c of cards) {
     const want = (c === hoverCard && !strip.open) ? 1 : 0;
     if (Math.abs(want - c.hover) < 0.001) { c.hover = want; continue; }
-    c.hover += (want - c.hover) * (1 - Math.pow(0.8, dt));
+    c.hover += (want - c.hover) * (1 - Math.pow(0.84, dt));
     moving = true;
   }
 
@@ -474,18 +522,23 @@ function frame(ts) {
     const ang = cards[focus].angle + spin.angle;
     // rotate so focus sits at top, then morph toward strip
     const delta = euclidMod(Math.atan2(-Math.cos(ang), Math.sin(ang)) + Math.PI, Math.PI * 2) - Math.PI;
-    const damp = delta * (1 - THREE.MathUtils.smoothstep(m, 0, 0.55));
+    // align finishes earlier on open / later on close — keeps ring shape while rising
+    const damp = delta * (1 - THREE.MathUtils.smoothstep(m, 0, 0.48));
     const a = ang + damp - delta;
     projectCard(focus, stripOffset(focus), Ztmp);
-    const blend = THREE.MathUtils.smoothstep(m, 0.15, 1);
+    // Position blend delayed: strip stays low until curvature has bowed into an arc,
+    // so cards never cross the centre as a flat horizontal line (the close glitch).
+    const blendY = THREE.MathUtils.smoothstep(m, 0.38, 1);
+    const blendX = THREE.MathUtils.smoothstep(m, 0.12, 1);
     curve.start.set(
-      THREE.MathUtils.lerp(Math.cos(a) * R, Ztmp.x, blend),
-      THREE.MathUtils.lerp(Math.sin(a) * R, strip.bottom + Ztmp.height / 2, blend),
+      THREE.MathUtils.lerp(Math.cos(a) * R, Ztmp.x, blendX),
+      THREE.MathUtils.lerp(Math.sin(a) * R, strip.bottom + Ztmp.height / 2, blendY),
       0,
     );
     curve.along.set(Math.cos(damp), Math.sin(damp), 0);
     curve.inward.set(Math.sin(damp), -Math.cos(damp), 0);
-    curve.curve = Math.pow(1 - m, 2) / R;
+    // Faster curvature when leaving strip (pow 0.55 vs 2): arc forms before Y lifts
+    curve.curve = Math.pow(1 - m, 0.55) / Math.max(R, 1);
   }
 
   for (const c of cards) {
@@ -501,12 +554,14 @@ function frame(ts) {
       let dx = wrapStrip(strip.centres[i] - strip.centres[focus]);
       if (di * dx < 0) dx += Math.sign(di) * strip.length;
       projectCard(i, stripOffset(focus) + dx, _tmp);
-      const along = THREE.MathUtils.lerp(R * di * (Math.PI * 2 / cards.length), _tmp.x - Ztmp.x, m);
+      // bias toward ring spacing earlier on close (smoothstep), strip spacing when open
+      const alongT = THREE.MathUtils.smoothstep(m, 0.05, 0.85);
+      const along = THREE.MathUtils.lerp(R * di * (Math.PI * 2 / cards.length), _tmp.x - Ztmp.x, alongT);
       evalCurve(along);
       tw *= Math.pow(_tmp.width / tw, m);
       th *= Math.pow(_tmp.height / th, m);
       curve.point.addScaledVector(curve.up, (_tmp.height - Ztmp.height) / 2 * m);
-      opacity *= (c === expandedCard) ? 1 : 1 - THREE.MathUtils.smoothstep(Math.abs(curve.curve * along), Math.PI, 1.3 * Math.PI);
+      opacity *= (c === expandedCard) ? 1 : 1 - THREE.MathUtils.smoothstep(Math.abs(curve.curve * along), 0.85 * Math.PI, 1.15 * Math.PI);
       // rotate curve point by -spin so world matches group rotation later? reference does:
       // N.set(point.x*p + point.y*c, point.y*p - point.x*c, 0) with p=cos(angle), c=sin(angle)
       pos.set(
@@ -557,8 +612,9 @@ function resize() {
   camera.position.z = H / 2 / Math.tan(THREE.MathUtils.degToRad(30));
   camera.updateProjectionMatrix();
 
-  radius = Math.min(W * (W < 640 ? 0.46 : 0.42), 0.38 * H);
-  const base = Math.min(46 * (W < 640 ? 0.75 : 1), (Math.PI * 2 * radius) / cards.length * 0.62);
+  // Smaller ring → more beige margin around the outside (user feedback)
+  radius = Math.min(W * (W < 640 ? 0.30 : 0.34), 0.265 * H);
+  const base = Math.min(40 * (W < 640 ? 0.70 : 1), (Math.PI * 2 * radius) / cards.length * 0.52);
   for (const c of cards) {
     c.thumbW = base * Math.sqrt(aspectOf(c));
     c.thumbH = base / Math.sqrt(aspectOf(c));
@@ -673,7 +729,7 @@ function onPointerUp(e) {
   pointer = null;
 
   if (strip.open) {
-    if (didDrag && e.timeStamp - time < 80) strip.target += 180 * velocity;
+    if (didDrag && e.timeStamp - time < 100) strip.target += 220 * velocity;
     if (pendingSnap != null) settleStrip();
     if (didDrag) { setCursor('grab'); return; }
   } else if (didDrag) {
@@ -704,7 +760,7 @@ function onWheel(e) {
     if (pendingSnap == null) pendingSnap = snapX(strip.target);
     strip.target += delta;
     clearTimeout(snapTimer);
-    snapTimer = setTimeout(settleStrip, 160);
+    snapTimer = setTimeout(settleStrip, 140);
     return;
   }
   if (morph.expand > 0) return;
