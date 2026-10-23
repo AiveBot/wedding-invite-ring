@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>圆环 · 婚礼邀请函 MVP</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="space" id="space" data-paper>
+    <div class="hint" id="hint">拖动旋转 · 点按查看</div>
+    <div class="centre" id="centre" aria-hidden="false">
+      <div class="centre-names">新郎 &amp; 新娘</div>
+      <div class="centre-date">2027.05.20</div>
+      <div class="centre-place">示例花园</div>
+    </div>
+    <div class="detail" id="detail" hidden>
+      <div class="detail-title" id="detailTitle"></div>
+      <div class="detail-text" id="detailText"></div>
+      <div class="detail-hint">滑动浏览 · Esc 关闭</div>
+    </div>
+    <div class="host" id="host" tabindex="0" data-cursor="grab">
+      <canvas class="canvas" id="canvas"></canvas>
+    </div>
+    <div class="cursor-label" id="cursorLabel" hidden></div>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
